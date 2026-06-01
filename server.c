@@ -157,7 +157,8 @@ void get_local_ip(char *buffer, size_t buflen) {
 
 // Ağaçtaki onay kutusuna (tik) tıklandığında çalışır
 void on_cell_toggled(GtkCellRendererToggle *cell, gchar *path_string, gpointer user_data) {
-    if (is_running) return; 
+    (void)cell;
+    if (is_running) return;
     
     GtkTreeModel *model = GTK_TREE_MODEL(user_data);
     GtkTreeIter iter;
@@ -407,6 +408,7 @@ void *client_handler(void *socket_desc) {
 }
 
 void *server_thread(void *arg) {
+    (void)arg;
     int client_sock, c;
     struct sockaddr_in client;
 
@@ -454,6 +456,7 @@ void on_refresh_clicked(GtkWidget *widget, gpointer data) {
 }
 
 void on_toggle_clicked(GtkWidget *widget, gpointer data) {
+    (void)widget; (void)data;
     if (!is_running) {
         pthread_rwlock_wrlock(&cache_rwlock);
         if (cached_list_response) {

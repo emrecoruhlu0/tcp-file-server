@@ -78,7 +78,7 @@ typedef struct {
 // Transfer bittiğinde ana thread'e geçirilen sonuç.
 typedef struct {
     int  success;          // 1 = başarılı
-    char message[256];     // dialogda gösterilecek mesaj
+    char message[320];     // dialogda gösterilecek mesaj (çağıranların m[300]'ünü taşırmadan alır)
 } TransferResult;
 
 // Worker thread'e geçirilen iş tanımı (GET veya PUT).
@@ -303,6 +303,7 @@ static void start_transfer(TransferJob *job) {
 }
 
 void on_connect_clicked(GtkWidget *w, gpointer data) {
+    (void)w; (void)data;
     const char *ip = gtk_entry_get_text(GTK_ENTRY(ip_entry));
     int port = gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(port_spin));
     
@@ -414,6 +415,7 @@ void on_connect_clicked(GtkWidget *w, gpointer data) {
 }
 
 void on_disconnect_clicked(GtkWidget *w, gpointer data) {
+    (void)w; (void)data;
     if (client_sock != -1) {
         close(client_sock);
         client_sock = -1;
@@ -427,6 +429,7 @@ void on_disconnect_clicked(GtkWidget *w, gpointer data) {
 }
 
 void on_get_clicked(GtkWidget *w, gpointer data) {
+    (void)w; (void)data;
     if (client_sock == -1) return;
     if (transfer_active) return; // Aynı anda tek transfer
 
@@ -481,6 +484,7 @@ cleanup:
 }
 
 void on_put_clicked(GtkWidget *w, gpointer data) {
+    (void)w; (void)data;
     if (client_sock == -1) return;
     if (transfer_active) return; // Aynı anda tek transfer
 
