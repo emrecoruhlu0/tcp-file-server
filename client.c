@@ -148,6 +148,32 @@ int recv_line(int sock, char *buf, int maxlen) {
     return i;
 }
 
+// Byte sayısını insan-okunur birime çevirir (B / KB / MB / GB).
+static void human_size(double bytes, char *out, size_t outlen) {
+    const char *units[] = {"B", "KB", "MB", "GB", "TB"};
+    int i = 0;
+    while (bytes >= 1024.0 && i < 4) { bytes /= 1024.0; i++; }
+    snprintf(out, outlen, "%.1f %s", bytes, units[i]);
+}
+
+// İlerleme metnini "İndiriliyor: %45 — 3.2 MB/s — ~12 sn" formatında hazırlar.
+// elapsed_sec: transfer başından beri geçen süre; speed = done/elapsed.
+static void format_progress(char *out, size_t outlen, const char *verb,
+                            long done, long total, double elapsed_sec) {
+    double frac = (total > 0) ? (double)done / (double)total : 1.0;
+    double speed = (elapsed_sec > 0.0) ? (double)done / elapsed_sec : 0.0; // byte/s
+    char spd[32];
+    human_size(speed, spd, sizeof(spd));
+
+    if (speed > 0.0 && total > done) {
+        double eta = (double)(total - done) / speed; // saniye
+        if (eta < 1.0) eta = 1.0;
+        snprintf(out, outlen, "%s %.0f%% — %s/s — ~%.0f sn", verb, frac * 100.0, spd, eta);
+    } else {
+        snprintf(out, outlen, "%s %.0f%% — %s/s", verb, frac * 100.0, spd);
+    }
+}
+
 // Transferi gerçekleştiren worker thread. GUI'ye yalnızca post_progress/post_result
 // üzerinden (g_idle_add) dokunur; doğrudan GTK çağrısı yapmaz.
 static void *transfer_worker(void *arg) {
@@ -183,6 +209,7 @@ static void *transfer_worker(void *arg) {
         }
 
         long total = 0;
+        gint64 start_us = g_get_monotonic_time();
         while (total < size) {
             long remaining = size - total;
             size_t to_recv = (remaining < (long)sizeof(buf)) ? (size_t)remaining : sizeof(buf);
@@ -192,9 +219,9 @@ static void *transfer_worker(void *arg) {
             total += rx;
 
             double frac = (size > 0) ? (double)total / (double)size : 1.0;
+            double elapsed = (g_get_monotonic_time() - start_us) / 1e6;
             char ptext[128];
-            snprintf(ptext, sizeof(ptext), "İndiriliyor: %ld / %ld byte (%.0f%%)",
-                     total, size, frac * 100.0);
+            format_progress(ptext, sizeof(ptext), "İndiriliyor", total, size, elapsed);
             post_progress(frac, ptext);
         }
         fclose(f);
@@ -228,15 +255,16 @@ static void *transfer_worker(void *arg) {
 
         long total = 0;
         size_t r;
+        gint64 start_us = g_get_monotonic_time();
         while ((r = fread(buf, 1, sizeof(buf), f)) > 0) {
             ssize_t s = send(client_sock, buf, r, 0);
             if (s <= 0) break;
             total += s;
 
             double frac = (job->filesize > 0) ? (double)total / (double)job->filesize : 1.0;
+            double elapsed = (g_get_monotonic_time() - start_us) / 1e6;
             char ptext[128];
-            snprintf(ptext, sizeof(ptext), "Yükleniyor: %ld / %ld byte (%.0f%%)",
-                     total, job->filesize, frac * 100.0);
+            format_progress(ptext, sizeof(ptext), "Yükleniyor", total, job->filesize, elapsed);
             post_progress(frac, ptext);
         }
         fclose(f);
@@ -289,7 +317,7 @@ void on_connect_clicked(GtkWidget *w, gpointer data) {
     sa.sin_family = AF_INET;
     sa.sin_port = htons(port);
     
-    gtk_label_set_markup(GTK_LABEL(status_label), "Bağlanılıyor...");
+    gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='#b45309' weight='bold'>⏳ Bağlanılıyor…</span>");
     // GUI'nin yanıt vermez görünmemesi için etiketi hemen çiz.
     while (gtk_events_pending()) gtk_main_iteration();
 
@@ -300,7 +328,7 @@ void on_connect_clicked(GtkWidget *w, gpointer data) {
         return;
     }
     
-    gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='green' weight='bold'>Bağlanıldı! Dosyalar getiriliyor...</span>");
+    gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='green' weight='bold'>✓ Bağlanıldı — dosyalar getiriliyor…</span>");
     gtk_widget_set_sensitive(connect_btn, FALSE);
     gtk_widget_set_sensitive(ip_entry, FALSE);
     gtk_widget_set_sensitive(port_spin, FALSE);
@@ -350,7 +378,6 @@ void on_connect_clicked(GtkWidget *w, gpointer data) {
         char *p_depth = strtok_r(line, "|", &saveptr2);
         char *p_ticked = strtok_r(NULL, "|", &saveptr2);
         char *p_dir = strtok_r(NULL, "|", &saveptr2);
-        (void)p_dir; // is_dir bilgisi şimdilik kullanılmıyor (-Wextra uyarısını sustur)
         char *p_name = strtok_r(NULL, "|", &saveptr2);
         char *p_path = strtok_r(NULL, "", &saveptr2);
 
@@ -368,6 +395,8 @@ void on_connect_clicked(GtkWidget *w, gpointer data) {
             gtk_tree_store_append(tree_store, &iters[depth], parent);
             
             const char *color = is_ticked ? "black" : "red";
+            // p_name zaten sunucu tarafında 📁/📄 ikonuyla geliyor.
+            (void)p_dir;
             char display_name[512];
             if (is_ticked) {
                 snprintf(display_name, sizeof(display_name), "%s", p_name);
@@ -393,7 +422,7 @@ void on_disconnect_clicked(GtkWidget *w, gpointer data) {
     gtk_widget_set_sensitive(ip_entry, TRUE);
     gtk_widget_set_sensitive(port_spin, TRUE);
     gtk_widget_set_sensitive(disconnect_btn, FALSE);
-    gtk_label_set_markup(GTK_LABEL(status_label), "<span weight='bold'>Bağlantı kesildi.</span>");
+    gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='#6b7280' weight='bold'>● Bağlantı kesildi.</span>");
     gtk_tree_store_clear(tree_store);
 }
 
@@ -492,16 +521,47 @@ static void apply_css(void) {
         "  padding: 8px 14px;"
         "  border-radius: 6px;"
         "  font-weight: bold;"
+        "  border: 1px solid #cbd5e1;"
+        "  background-image: none;"
+        "  background-color: #ffffff;"
+        "  transition: background-color 120ms ease, box-shadow 120ms ease;"
         "}"
-        "button:hover { background-image: none; background-color: #d9e6f2; }"
+        "button:hover { background-image: none; background-color: #eef4fb; }"
+        "button:active { background-image: none; background-color: #d9e6f2; }"
+        "button:disabled { color: #9aa5b1; background-color: #f0f2f5; }"
+        /* Birincil aksiyon (Bağlan / İndir) */
+        "button.primary {"
+        "  background-image: none; background-color: #3b82f6;"
+        "  color: #ffffff; border: 1px solid #2563eb;"
+        "}"
+        "button.primary:hover { background-color: #2f74e6; }"
+        "button.primary:active { background-color: #2563eb; }"
+        /* İkincil/yükle aksiyonu */
+        "button.accent {"
+        "  background-image: none; background-color: #0ea5a4;"
+        "  color: #ffffff; border: 1px solid #0d9488;"
+        "}"
+        "button.accent:hover { background-color: #0d9488; }"
+        /* Tehlikeli aksiyon (Kopar) */
+        "button.danger {"
+        "  background-image: none; background-color: #ef4444;"
+        "  color: #ffffff; border: 1px solid #dc2626;"
+        "}"
+        "button.danger:hover { background-color: #dc2626; }"
         "entry { border-radius: 6px; padding: 4px 8px; }"
+        "entry:focus { border-color: #3b82f6; box-shadow: 0 0 0 2px #bfdbfe; }"
+        "spinbutton:focus { border-color: #3b82f6; }"
         "progressbar > trough { min-height: 18px; border-radius: 6px; }"
         "progressbar > trough > progress {"
         "  background-image: none;"
         "  background-color: #2e8b57;"
         "  border-radius: 6px;"
         "}"
-        "treeview { font-size: 11pt; }";
+        "progressbar text { font-weight: bold; }"
+        "treeview { font-size: 11pt; }"
+        "treeview:selected { background-color: #3b82f6; color: #ffffff; }"
+        "treeview header button { font-weight: bold; background-color: #eef2f7; }"
+        "label.section { font-weight: bold; font-size: 11pt; }";
 
     gtk_css_provider_load_from_data(provider, css, -1, NULL);
     gtk_style_context_add_provider_for_screen(
@@ -533,18 +593,22 @@ int main(int argc, char *argv[]) {
     
     gtk_box_pack_start(GTK_BOX(top_hbox), gtk_label_new("Port:"), FALSE, FALSE, 0);
     port_spin = gtk_spin_button_new_with_range(1, 65535, 1);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(port_spin), 8080); // makul varsayılan
     gtk_box_pack_start(GTK_BOX(top_hbox), port_spin, FALSE, FALSE, 0);
     
     connect_btn = gtk_button_new_with_label("Bağlan");
+    gtk_style_context_add_class(gtk_widget_get_style_context(connect_btn), "primary");
     g_signal_connect(connect_btn, "clicked", G_CALLBACK(on_connect_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(top_hbox), connect_btn, FALSE, FALSE, 0);
-    
+
     disconnect_btn = gtk_button_new_with_label("Kopar");
-    gtk_widget_set_sensitive(disconnect_btn, FALSE); 
+    gtk_style_context_add_class(gtk_widget_get_style_context(disconnect_btn), "danger");
+    gtk_widget_set_sensitive(disconnect_btn, FALSE);
     g_signal_connect(disconnect_btn, "clicked", G_CALLBACK(on_disconnect_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(top_hbox), disconnect_btn, FALSE, FALSE, 0);
     
-    status_label = gtk_label_new("Bağlantı bekleniyor...");
+    status_label = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='#6b7280'>Bağlantı bekleniyor…</span>");
     gtk_widget_set_halign(status_label, GTK_ALIGN_START);
     gtk_box_pack_start(GTK_BOX(vbox), status_label, FALSE, FALSE, 0);
     
@@ -557,7 +621,9 @@ int main(int argc, char *argv[]) {
     g_object_unref(tree_store);
     
     GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
-    GtkTreeViewColumn *col = gtk_tree_view_column_new_with_attributes("Sunucu Klasörleri", renderer, "text", 0, "foreground", 1, NULL);
+    GtkTreeViewColumn *col = gtk_tree_view_column_new_with_attributes("Sunucu Dosya ve Klasörleri", renderer, "text", 0, "foreground", 1, NULL);
+    gtk_tree_view_column_set_expand(col, TRUE);
+    gtk_tree_view_column_set_resizable(col, TRUE);
     gtk_tree_view_append_column(GTK_TREE_VIEW(tree_view), col);
     gtk_container_add(GTK_CONTAINER(scroll), tree_view);
     
@@ -565,11 +631,13 @@ int main(int argc, char *argv[]) {
     GtkWidget *bottom_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
     gtk_box_pack_start(GTK_BOX(vbox), bottom_hbox, FALSE, FALSE, 0);
     
-    get_btn = gtk_button_new_with_label("Seçili Dosyayı İndir (GET)");
+    get_btn = gtk_button_new_with_label("⬇  Seçili Dosyayı İndir");
+    gtk_style_context_add_class(gtk_widget_get_style_context(get_btn), "primary");
     gtk_box_pack_start(GTK_BOX(bottom_hbox), get_btn, TRUE, TRUE, 0);
     g_signal_connect(get_btn, "clicked", G_CALLBACK(on_get_clicked), NULL);
 
-    put_btn = gtk_button_new_with_label("Sunucuya Dosya Yükle (PUT)");
+    put_btn = gtk_button_new_with_label("⬆  Sunucuya Dosya Yükle");
+    gtk_style_context_add_class(gtk_widget_get_style_context(put_btn), "accent");
     gtk_box_pack_start(GTK_BOX(bottom_hbox), put_btn, TRUE, TRUE, 0);
     g_signal_connect(put_btn, "clicked", G_CALLBACK(on_put_clicked), NULL);
 

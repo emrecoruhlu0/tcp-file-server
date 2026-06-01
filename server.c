@@ -36,6 +36,7 @@ GtkWidget *main_window;
 GtkWidget *status_label;
 GtkWidget *ip_port_label;
 GtkWidget *toggle_button;
+GtkWidget *refresh_button;  // Dosya listesini yeniden tara
 GtkWidget *tree_view;
 GtkWidget *scrolled_window;
 GtkTreeStore *tree_store;
@@ -96,7 +97,7 @@ static gboolean refresh_clients_label(gpointer data) {
         int n = connected_clients;
         pthread_mutex_unlock(&clients_mutex);
         char txt[64];
-        snprintf(txt, sizeof(txt), "Bağlı istemci: <b>%d</b>", n);
+        snprintf(txt, sizeof(txt), "👥  Bağlı istemci: <b>%d</b>", n);
         gtk_label_set_markup(GTK_LABEL(clients_label), txt);
     }
     return G_SOURCE_REMOVE;
@@ -441,6 +442,17 @@ void *server_thread(void *arg) {
     return NULL;
 }
 
+// "Yenile" butonu: çalışma dizinini yeniden tarayıp ağacı tazeler.
+// Yalnızca sunucu durmuşken anlamlıdır (çalışırken buton zaten pasiftir).
+void on_refresh_clicked(GtkWidget *widget, gpointer data) {
+    (void)widget; (void)data;
+    if (is_running) return;
+    gtk_tree_store_clear(tree_store);
+    populate_tree(tree_store, NULL, ".", 0);
+    gtk_tree_view_expand_all(GTK_TREE_VIEW(tree_view));
+    log_event("Dosya listesi yenilendi.");
+}
+
 void on_toggle_clicked(GtkWidget *widget, gpointer data) {
     if (!is_running) {
         pthread_rwlock_wrlock(&cache_rwlock);
@@ -485,7 +497,10 @@ void on_toggle_clicked(GtkWidget *widget, gpointer data) {
         
         is_running = 1;
         gtk_button_set_label(GTK_BUTTON(toggle_button), "Sunucuyu Durdur");
-        
+        gtk_style_context_remove_class(gtk_widget_get_style_context(toggle_button), "primary");
+        gtk_style_context_add_class(gtk_widget_get_style_context(toggle_button), "danger");
+        gtk_widget_set_sensitive(refresh_button, FALSE); // Çalışırken liste değiştirilemez
+
         gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='green' weight='bold'>Durum: Çalışıyor</span>");
         
         char ip_port_markup[256];
@@ -497,6 +512,21 @@ void on_toggle_clicked(GtkWidget *widget, gpointer data) {
         pthread_create(&server_thread_id, NULL, server_thread, NULL);
         pthread_detach(server_thread_id);
     } else {
+        // Aktif bağlantı varken durdurma kullanıcıya doğrulatılır.
+        pthread_mutex_lock(&clients_mutex);
+        int active = connected_clients;
+        pthread_mutex_unlock(&clients_mutex);
+        if (active > 0) {
+            GtkWidget *q = gtk_message_dialog_new(
+                GTK_WINDOW(main_window), GTK_DIALOG_MODAL,
+                GTK_MESSAGE_QUESTION, GTK_BUTTONS_YES_NO,
+                "Şu an %d istemci bağlı. Sunucuyu durdurmak aktif transferleri "
+                "kesecek. Yine de durdurulsun mu?", active);
+            int resp = gtk_dialog_run(GTK_DIALOG(q));
+            gtk_widget_destroy(q);
+            if (resp != GTK_RESPONSE_YES) return; // Vazgeçildi
+        }
+
         is_running = 0;
         if (server_sock != -1) {
             shutdown(server_sock, SHUT_RDWR);
@@ -504,9 +534,12 @@ void on_toggle_clicked(GtkWidget *widget, gpointer data) {
             server_sock = -1;
         }
         gtk_button_set_label(GTK_BUTTON(toggle_button), "Sunucuyu Başlat");
+        gtk_style_context_remove_class(gtk_widget_get_style_context(toggle_button), "danger");
+        gtk_style_context_add_class(gtk_widget_get_style_context(toggle_button), "primary");
+        gtk_widget_set_sensitive(refresh_button, TRUE);
         gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='red' weight='bold'>Durum: Durduruldu</span>");
         gtk_label_set_text(GTK_LABEL(ip_port_label), "");
-        
+
         log_event("Sunucu durduruldu.");
 
         pthread_rwlock_wrlock(&cache_rwlock);
@@ -528,11 +561,32 @@ static void apply_css(void) {
         "  padding: 8px 14px;"
         "  border-radius: 6px;"
         "  font-weight: bold;"
+        "  border: 1px solid #cbd5e1;"
+        "  background-image: none;"
+        "  background-color: #ffffff;"
+        "  transition: background-color 120ms ease;"
         "}"
-        "button:hover { background-image: none; background-color: #d9e6f2; }"
+        "button:hover { background-image: none; background-color: #eef4fb; }"
+        "button:active { background-image: none; background-color: #d9e6f2; }"
+        "button:disabled { color: #9aa5b1; background-color: #f0f2f5; }"
+        /* Sunucuyu başlat (yeşil/birincil) */
+        "button.primary {"
+        "  background-image: none; background-color: #2e8b57;"
+        "  color: #ffffff; border: 1px solid #277a4c;"
+        "}"
+        "button.primary:hover { background-color: #277a4c; }"
+        /* Sunucuyu durdur (kırmızı) */
+        "button.danger {"
+        "  background-image: none; background-color: #ef4444;"
+        "  color: #ffffff; border: 1px solid #dc2626;"
+        "}"
+        "button.danger:hover { background-color: #dc2626; }"
         "textview { font-size: 10pt; background-color: #1e1e1e; color: #d4d4d4; }"
         "textview text { background-color: #1e1e1e; color: #d4d4d4; }"
-        "treeview { font-size: 11pt; }";
+        "treeview { font-size: 11pt; }"
+        "treeview:selected { background-color: #3b82f6; color: #ffffff; }"
+        "treeview header button { font-weight: bold; background-color: #eef2f7; }"
+        "label.section { font-weight: bold; font-size: 11pt; }";
 
     gtk_css_provider_load_from_data(provider, css, -1, NULL);
     gtk_style_context_add_provider_for_screen(
@@ -568,25 +622,42 @@ int main(int argc, char *argv[]) {
 
     // Bağlı istemci sayacı (canlı güncellenir).
     clients_label = gtk_label_new(NULL);
-    gtk_label_set_markup(GTK_LABEL(clients_label), "Bağlı istemci: <b>0</b>");
+    gtk_label_set_markup(GTK_LABEL(clients_label), "👥  Bağlı istemci: <b>0</b>");
     gtk_widget_set_halign(clients_label, GTK_ALIGN_START);
     gtk_box_pack_start(GTK_BOX(vbox), clients_label, FALSE, FALSE, 0);
 
+    // Başlat/Durdur + Yenile butonları yan yana.
+    GtkWidget *btn_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    gtk_box_pack_start(GTK_BOX(vbox), btn_hbox, FALSE, FALSE, 0);
+
     toggle_button = gtk_button_new_with_label("Sunucuyu Başlat");
     gtk_widget_set_size_request(toggle_button, -1, 40);
+    gtk_style_context_add_class(gtk_widget_get_style_context(toggle_button), "primary");
     g_signal_connect(toggle_button, "clicked", G_CALLBACK(on_toggle_clicked), NULL);
-    gtk_box_pack_start(GTK_BOX(vbox), toggle_button, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(btn_hbox), toggle_button, TRUE, TRUE, 0);
+
+    refresh_button = gtk_button_new_with_label("🔄  Yenile");
+    gtk_widget_set_size_request(refresh_button, -1, 40);
+    gtk_widget_set_tooltip_text(refresh_button, "Çalışma dizinini yeniden tara (sunucu durmuşken)");
+    g_signal_connect(refresh_button, "clicked", G_CALLBACK(on_refresh_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(btn_hbox), refresh_button, FALSE, FALSE, 0);
+
+    // Dosya ağacı ve log paneli ayarlanabilir bir bölmede (kullanıcı sürükleyebilir).
+    GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_VERTICAL);
+    gtk_box_pack_start(GTK_BOX(vbox), paned, TRUE, TRUE, 0);
 
     scrolled_window = gtk_scrolled_window_new(NULL, NULL);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled_window), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
-    gtk_box_pack_start(GTK_BOX(vbox), scrolled_window, TRUE, TRUE, 0);
+    gtk_paned_pack1(GTK_PANED(paned), scrolled_window, TRUE, FALSE);
 
     tree_store = gtk_tree_store_new(3, G_TYPE_STRING, G_TYPE_BOOLEAN, G_TYPE_STRING);
     tree_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(tree_store));
     g_object_unref(tree_store);
 
     GtkCellRenderer *text_renderer = gtk_cell_renderer_text_new();
-    GtkTreeViewColumn *text_column = gtk_tree_view_column_new_with_attributes("Sunucu Dosyaları", text_renderer, "text", 0, NULL);
+    GtkTreeViewColumn *text_column = gtk_tree_view_column_new_with_attributes("Sunucu Dosya ve Klasörleri", text_renderer, "text", 0, NULL);
+    gtk_tree_view_column_set_expand(text_column, TRUE);
+    gtk_tree_view_column_set_resizable(text_column, TRUE);
     gtk_tree_view_append_column(GTK_TREE_VIEW(tree_view), text_column);
 
     GtkCellRenderer *toggle_renderer = gtk_cell_renderer_toggle_new();
@@ -599,16 +670,21 @@ int main(int argc, char *argv[]) {
     populate_tree(tree_store, NULL, ".", 0);
     gtk_tree_view_expand_all(GTK_TREE_VIEW(tree_view));
 
-    // ---- Canlı log paneli ----
+    // ---- Canlı log paneli (paned'in alt bölmesinde, yeniden boyutlandırılabilir) ----
+    GtkWidget *log_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_paned_pack2(GTK_PANED(paned), log_box, FALSE, TRUE);
+    // Bölme tutamacının makul bir başlangıç konumu (üstte ağaç, altta log).
+    gtk_paned_set_position(GTK_PANED(paned), 320);
+
     GtkWidget *log_label = gtk_label_new(NULL);
     gtk_label_set_markup(GTK_LABEL(log_label), "<b>Olay Günlüğü</b>");
     gtk_widget_set_halign(log_label, GTK_ALIGN_START);
-    gtk_box_pack_start(GTK_BOX(vbox), log_label, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(log_box), log_label, FALSE, FALSE, 0);
 
     GtkWidget *log_scroll = gtk_scrolled_window_new(NULL, NULL);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(log_scroll), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
-    gtk_widget_set_size_request(log_scroll, -1, 150);
-    gtk_box_pack_start(GTK_BOX(vbox), log_scroll, FALSE, TRUE, 0);
+    gtk_widget_set_size_request(log_scroll, -1, 120);
+    gtk_box_pack_start(GTK_BOX(log_box), log_scroll, TRUE, TRUE, 0);
 
     log_view = gtk_text_view_new();
     gtk_text_view_set_editable(GTK_TEXT_VIEW(log_view), FALSE);
