@@ -20,6 +20,8 @@ paylaşım uygulaması geliştirmek.
   (`cached_list_response`) sahiptir; tüm istemciler aynı tampondan okur.
 - **İstemci (`client.c`)**: GTK arayüzünden sunucu IP/port'una bağlanır, `LIST`
   yanıtını alıp ağaç olarak gösterir, kullanıcı seçimine göre `GET`/`PUT` yapar.
+  Dosya transferleri **ayrı bir worker thread'de** yürütülür; GUI ana thread'i
+  bloke olmaz. İlerleme bir `GtkProgressBar` ile canlı gösterilir.
 - **Protokol** (satır temelli):
   - `LIST\n` → sunucu, satır başına `depth|ticked|is_dir|name|path\n`
     formatında listeyi gönderir, `__END_OF_LIST__\n` ile sonlandırır.
@@ -36,8 +38,17 @@ paylaşım uygulaması geliştirmek.
 - **TCP soketleri**: `socket`, `bind`, `listen`, `accept`, `connect`,
   `send`/`recv`. Sunucu portu `0` ile bind edilip kernel'in atadığı port
   arayüzde gösterilir.
-- **Çoklu thread**: POSIX `pthread`. Her istemciye bir thread (`pthread_create`
-  + `pthread_detach`).
+- **Çoklu thread**: POSIX `pthread`. Sunucuda her istemciye bir thread
+  (`pthread_create` + `pthread_detach`). İstemcide her dosya transferi için ayrı
+  bir worker thread; böylece GET/PUT sırasında arayüz donmaz.
+- **Thread ↔ GUI senkronizasyonu**: GTK thread-safe olmadığından, worker
+  thread'ler arayüze **doğrudan dokunmaz**; ilerleme/sonuç/log güncellemeleri
+  `g_idle_add` ile GTK ana döngüsüne aktarılır. İstemcide
+  `post_progress`/`post_result`, sunucuda `append_log_to_view`/
+  `refresh_clients_label` bu köprüyü kurar.
+- **Zaman aşımlı bağlanma**: İstemci `connect()`'i non-blocking soket +
+  `select()` ile sarmalar (`connect_with_timeout`, 5 sn). Erişilemeyen bir IP'ye
+  bağlanırken arayüz dakikalarca kilitlenmez.
 - **Senkronizasyon**:
   - `pthread_mutex_t log_mutex` — log dosyasına yazımı serileştirir.
   - `pthread_rwlock_t cache_rwlock` — paylaşımlı `cached_list_response` tamponu:
@@ -79,7 +90,9 @@ Sunucu:
 
 GUI açıldığında paylaşmak istediğiniz dosya/klasörlerin yanındaki onay
 kutusunu işaretleyin, **Sunucuyu Başlat**'a basın. Arayüzde gösterilen IP ve
-port'u istemciye iletin.
+port'u istemciye iletin. Pencerenin altındaki **Olay Günlüğü** paneli tüm
+bağlantı/komut olaylarını canlı gösterir; üstte **Bağlı istemci** sayacı
+eşzamanlı bağlantı sayısını anlık olarak yansıtır.
 
 İstemci (aynı veya farklı makinede):
 
@@ -88,7 +101,9 @@ port'u istemciye iletin.
 ```
 
 IP ve port'u girip **Bağlan**'a basın. Ağaçtan dosya seçip **GET**, ya da
-yerel bir dosya için **PUT** yapın.
+yerel bir dosya için **PUT** yapın. Transfer sırasında alttaki **ilerleme
+çubuğu** yüzde ve aktarılan byte miktarını gösterir; arayüz boyunca donma
+yaşanmaz (transfer ayrı thread'de yürür).
 
 ## Testler
 
@@ -147,3 +162,14 @@ sınırlayıcı olur.
   stack'i tüketebilirdi. Çözüm: `MAX_TREE_DEPTH` ile sınır.
 - **Protokol senkronizasyonu (PUT)**: `fopen` başarısızsa istemci yine
   veri yollayabilirdi; istemci `OK` aksi halde göndermiyor olarak güncellendi.
+- **GUI donması (büyük dosya transferi)**: GET/PUT soket G/Ç'si GTK ana
+  thread'inde çalışıyor, transfer boyunca arayüz yanıt vermiyordu. Çözüm:
+  transferi ayrı worker thread'e taşıma; ilerleme/sonuç ana thread'e
+  `g_idle_add` ile aktarılıyor (GTK thread-safe olmadığından zorunlu).
+- **Bloklayan `connect()`**: Erişilemeyen bir IP'ye bağlanırken arayüz
+  varsayılan TCP zaman aşımı kadar (dakikalar) kilitleniyordu. Çözüm:
+  non-blocking soket + `select()` ile 5 sn'lik `connect_with_timeout`.
+- **Sabit boyutlu `iters` dizisi (istemci)**: LIST ayrıştırmasında
+  `GtkTreeIter iters[100]` kullanılıyordu; bozuk/aşırı derin bir satır taşmaya
+  yol açabilirdi. Çözüm: diziyi `MAX_TREE_DEPTH` ile boyutlandırma ve `depth`
+  için sınır kontrolü.

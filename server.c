@@ -39,20 +39,76 @@ GtkWidget *toggle_button;
 GtkWidget *tree_view;
 GtkWidget *scrolled_window;
 GtkTreeStore *tree_store;
+GtkWidget *log_view;        // Canlı log paneli (GtkTextView)
+GtkWidget *clients_label;   // "Bağlı istemci: N" etiketi
 
-// Zaman damgalı log yazma fonksiyonu (Thread-safe)
+// Eşzamanlı bağlı istemci sayısı. Birçok client thread'i + GUI thread'i erişir,
+// bu yüzden atomik olarak güncellenir.
+volatile int connected_clients = 0;
+pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Ana thread'te çalışır (g_idle_add): tek bir log satırını GUI paneline ekler.
+// data: g_strdup ile ayrılmış, "[zaman] mesaj" biçimli satır; burada serbest bırakılır.
+static gboolean append_log_to_view(gpointer data) {
+    char *line = (char *)data;
+    if (log_view) {
+        GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(log_view));
+        GtkTextIter end;
+        gtk_text_buffer_get_end_iter(buf, &end);
+        gtk_text_buffer_insert(buf, &end, line, -1);
+        // En alta otomatik kaydır.
+        gtk_text_buffer_get_end_iter(buf, &end);
+        GtkTextMark *mark = gtk_text_buffer_create_mark(buf, NULL, &end, FALSE);
+        gtk_text_view_scroll_mark_onscreen(GTK_TEXT_VIEW(log_view), mark);
+        gtk_text_buffer_delete_mark(buf, mark);
+    }
+    g_free(line);
+    return G_SOURCE_REMOVE;
+}
+
+// Zaman damgalı log yazma fonksiyonu (Thread-safe).
+// Hem server.log dosyasına hem de GUI'deki canlı log paneline yazar.
 void log_event(const char *msg) {
+    time_t t = time(NULL);
+    struct tm *tm_info = localtime(&t);
+    char time_buf[26];
+    strftime(time_buf, 26, "%Y-%m-%d %H:%M:%S", tm_info);
+
     pthread_mutex_lock(&log_mutex);
     FILE *f = fopen("server.log", "a");
     if (f) {
-        time_t t = time(NULL);
-        struct tm *tm_info = localtime(&t);
-        char time_buf[26];
-        strftime(time_buf, 26, "%Y-%m-%d %H:%M:%S", tm_info);
         fprintf(f, "[%s] %s\n", time_buf, msg);
         fclose(f);
     }
     pthread_mutex_unlock(&log_mutex);
+
+    // GUI paneline iletmek için satırı hazırla; GTK'ya yalnızca ana thread'ten
+    // (g_idle_add) dokunulur çünkü log_event farklı client thread'lerinden çağrılır.
+    char *line = g_strdup_printf("[%s] %s\n", time_buf, msg);
+    g_idle_add(append_log_to_view, line);
+}
+
+// Ana thread'te çalışır (g_idle_add): bağlı istemci sayacını GUI'de günceller.
+static gboolean refresh_clients_label(gpointer data) {
+    (void)data;
+    if (clients_label) {
+        pthread_mutex_lock(&clients_mutex);
+        int n = connected_clients;
+        pthread_mutex_unlock(&clients_mutex);
+        char txt[64];
+        snprintf(txt, sizeof(txt), "Bağlı istemci: <b>%d</b>", n);
+        gtk_label_set_markup(GTK_LABEL(clients_label), txt);
+    }
+    return G_SOURCE_REMOVE;
+}
+
+// Sayacı değiştirir (delta: +1 bağlanınca, -1 kopunca) ve GUI'yi tetikler.
+static void update_client_count(int delta) {
+    pthread_mutex_lock(&clients_mutex);
+    connected_clients += delta;
+    if (connected_clients < 0) connected_clients = 0;
+    pthread_mutex_unlock(&clients_mutex);
+    g_idle_add(refresh_clients_label, NULL);
 }
 
 // Satır okuma yardımcı fonksiyonu (Komutları güvenle almak için)
@@ -107,7 +163,10 @@ void on_cell_toggled(GtkCellRendererToggle *cell, gchar *path_string, gpointer u
     GtkTreePath *path = gtk_tree_path_new_from_string(path_string);
     
     gboolean is_ticked;
-    gtk_tree_model_get_iter(model, &iter, path);
+    if (!gtk_tree_model_get_iter(model, &iter, path)) {
+        gtk_tree_path_free(path);
+        return;
+    }
     gtk_tree_model_get(model, &iter, 1, &is_ticked, -1);
     
     is_ticked = !is_ticked;
@@ -198,8 +257,10 @@ void build_cached_list_recursive(GtkTreeModel *model, GtkTreeIter *iter, int dep
 // İstemciyle ilgilenecek thread fonksiyonu
 void *client_handler(void *socket_desc) {
     int client_sock = *(int*)socket_desc;
-    free(socket_desc); 
-    
+    free(socket_desc);
+
+    update_client_count(+1);
+
     char buffer[BUFFER_SIZE];
 
     while(recv_line(client_sock, buffer, BUFFER_SIZE) > 0) {
@@ -340,6 +401,7 @@ void *client_handler(void *socket_desc) {
 
     log_event("Istemci baglantiyi kesti.");
     close(client_sock);
+    update_client_count(-1);
     pthread_exit(NULL);
 }
 
@@ -457,12 +519,35 @@ void on_toggle_clicked(GtkWidget *widget, gpointer data) {
     }
 }
 
+// Uygulamaya modern bir görünüm kazandıran CSS temasını yükler.
+static void apply_css(void) {
+    GtkCssProvider *provider = gtk_css_provider_new();
+    const char *css =
+        "window { background-color: #f4f6f8; }"
+        "button {"
+        "  padding: 8px 14px;"
+        "  border-radius: 6px;"
+        "  font-weight: bold;"
+        "}"
+        "button:hover { background-image: none; background-color: #d9e6f2; }"
+        "textview { font-size: 10pt; background-color: #1e1e1e; color: #d4d4d4; }"
+        "textview text { background-color: #1e1e1e; color: #d4d4d4; }"
+        "treeview { font-size: 11pt; }";
+
+    gtk_css_provider_load_from_data(provider, css, -1, NULL);
+    gtk_style_context_add_provider_for_screen(
+        gdk_screen_get_default(),
+        GTK_STYLE_PROVIDER(provider),
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(provider);
+}
+
 int main(int argc, char *argv[]) {
     gtk_init(&argc, &argv);
 
     main_window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(main_window), "TCP Dosya Sunucusu");
-    gtk_window_set_default_size(GTK_WINDOW(main_window), 500, 450);
+    gtk_window_set_default_size(GTK_WINDOW(main_window), 560, 640);
     gtk_container_set_border_width(GTK_CONTAINER(main_window), 20);
     g_signal_connect(main_window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
 
@@ -480,6 +565,12 @@ int main(int argc, char *argv[]) {
     ip_port_label = gtk_label_new("");
     gtk_widget_set_halign(ip_port_label, GTK_ALIGN_END);
     gtk_box_pack_start(GTK_BOX(top_hbox), ip_port_label, TRUE, TRUE, 0);
+
+    // Bağlı istemci sayacı (canlı güncellenir).
+    clients_label = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(clients_label), "Bağlı istemci: <b>0</b>");
+    gtk_widget_set_halign(clients_label, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(vbox), clients_label, FALSE, FALSE, 0);
 
     toggle_button = gtk_button_new_with_label("Sunucuyu Başlat");
     gtk_widget_set_size_request(toggle_button, -1, 40);
@@ -507,6 +598,25 @@ int main(int argc, char *argv[]) {
 
     populate_tree(tree_store, NULL, ".", 0);
     gtk_tree_view_expand_all(GTK_TREE_VIEW(tree_view));
+
+    // ---- Canlı log paneli ----
+    GtkWidget *log_label = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(log_label), "<b>Olay Günlüğü</b>");
+    gtk_widget_set_halign(log_label, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(vbox), log_label, FALSE, FALSE, 0);
+
+    GtkWidget *log_scroll = gtk_scrolled_window_new(NULL, NULL);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(log_scroll), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_widget_set_size_request(log_scroll, -1, 150);
+    gtk_box_pack_start(GTK_BOX(vbox), log_scroll, FALSE, TRUE, 0);
+
+    log_view = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(log_view), FALSE);
+    gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(log_view), FALSE);
+    gtk_text_view_set_monospace(GTK_TEXT_VIEW(log_view), TRUE);
+    gtk_container_add(GTK_CONTAINER(log_scroll), log_view);
+
+    apply_css(); // Modern görünüm
 
     gtk_widget_show_all(main_window);
     
