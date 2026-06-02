@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <gtk/gtk.h>
 #include <time.h>
+#include <sys/inotify.h>
 
 #define BUFFER_SIZE 4096
 
@@ -53,6 +54,10 @@ pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int notify_sockets[MAX_NOTIFY_CLIENTS];
 static int notify_count = 0;
 static pthread_mutex_t notify_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Dizin izleyici (inotify)
+static int inotify_fd = -1;
+static pthread_t inotify_thread_id;
 
 // Ana thread'te çalışır (g_idle_add): tek bir log satırını GUI paneline ekler.
 // data: g_strdup ile ayrılmış, "[zaman] mesaj" biçimli satır; burada serbest bırakılır.
@@ -141,6 +146,46 @@ static void broadcast_notify(void) {
     for (int i = 0; i < notify_count; i++)
         send(notify_sockets[i], "NOTIFY\n", 7, MSG_NOSIGNAL);
     pthread_mutex_unlock(&notify_mutex);
+}
+
+void populate_tree(GtkTreeStore *store, GtkTreeIter *parent, const char *path, int depth);
+static void rebuild_cache_from_disk(void);
+
+// Ana thread'te çalışır: sunucu ağaç görünümünü diskten yeniler.
+static gboolean refresh_server_tree_idle(gpointer data) {
+    (void)data;
+    if (!tree_store || !tree_view) return G_SOURCE_REMOVE;
+    gtk_tree_store_clear(tree_store);
+    populate_tree(tree_store, NULL, ".", 0);
+    gtk_tree_view_expand_all(GTK_TREE_VIEW(tree_view));
+    return G_SOURCE_REMOVE;
+}
+
+// İzleme thread'i: dizindeki değişikliklerde cache + GUI + istemcileri günceller.
+static void *inotify_watcher(void *arg) {
+    (void)arg;
+    char buf[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
+    while (inotify_fd != -1) {
+        ssize_t len = read(inotify_fd, buf, sizeof(buf));
+        if (len <= 0) break;
+        // Ardışık hızlı eventleri birleştirmek için kısa bekleme.
+        usleep(150000);
+        // Biriken ek eventleri tüket (artık sadece bir yenileme tetiklenir).
+        struct timeval tv = {0, 0};
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(inotify_fd, &fds);
+        while (select(inotify_fd + 1, &fds, NULL, NULL, &tv) > 0) {
+            if (read(inotify_fd, buf, sizeof(buf)) <= 0) break;
+            FD_ZERO(&fds);
+            FD_SET(inotify_fd, &fds);
+            tv.tv_sec = 0; tv.tv_usec = 0;
+        }
+        rebuild_cache_from_disk();
+        broadcast_notify();
+        g_idle_add(refresh_server_tree_idle, NULL);
+    }
+    return NULL;
 }
 
 // Satır okuma yardımcı fonksiyonu (Komutları güvenle almak için)
@@ -456,8 +501,6 @@ void *client_handler(void *socket_desc) {
                              "PUT %s (boyut: %ld byte, sure: %.3fs, hiz: %.2f MB/s)",
                              filename, total, elapsed, mbps);
                     log_event(log_msg);
-                    rebuild_cache_from_disk();
-                    broadcast_notify();
                 } else {
                     send(client_sock, "ERROR Sunucu dosyayi olusturamadi\n", 34, 0);
                     log_event("Hata: PUT icin dosya olusturulamadi.");
@@ -594,6 +637,14 @@ void on_toggle_clicked(GtkWidget *widget, gpointer data) {
         
         pthread_create(&server_thread_id, NULL, server_thread, NULL);
         pthread_detach(server_thread_id);
+
+        inotify_fd = inotify_init();
+        if (inotify_fd >= 0) {
+            inotify_add_watch(inotify_fd, ".",
+                IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_CLOSE_WRITE);
+            pthread_create(&inotify_thread_id, NULL, inotify_watcher, NULL);
+            pthread_detach(inotify_thread_id);
+        }
     } else {
         // Aktif bağlantı varken durdurma kullanıcıya doğrulatılır.
         pthread_mutex_lock(&clients_mutex);
@@ -611,6 +662,10 @@ void on_toggle_clicked(GtkWidget *widget, gpointer data) {
         }
 
         is_running = 0;
+        if (inotify_fd != -1) {
+            close(inotify_fd);
+            inotify_fd = -1;
+        }
         if (server_sock != -1) {
             shutdown(server_sock, SHUT_RDWR);
             close(server_sock);
