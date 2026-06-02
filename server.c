@@ -320,6 +320,60 @@ void populate_tree(GtkTreeStore *store, GtkTreeIter *parent, const char *path, i
 
 void append_to_cache(int depth, gboolean is_ticked, int is_dir, const char *name, const char *path);
 
+// Mevcut cache'deki her yol için erişim durumunu (ticked) tutan geçici yapı.
+typedef struct { char path[2048]; int ticked; } PathTick;
+static PathTick *saved_ticks   = NULL;
+static int       saved_tick_n  = 0;
+
+// Cache'deki ticked değerlerini saved_ticks dizisine kopyalar (write lock altında çağrılır).
+static void save_ticks_from_cache(void) {
+    free(saved_ticks);
+    saved_ticks  = NULL;
+    saved_tick_n = 0;
+    if (!cached_list_response || cached_size == 0) return;
+
+    char *copy = strdup(cached_list_response);
+    if (!copy) return;
+
+    int cap = 64;
+    saved_ticks = malloc(cap * sizeof(PathTick));
+    if (!saved_ticks) { free(copy); return; }
+
+    char *sp1, *line = strtok_r(copy, "\n", &sp1);
+    while (line) {
+        char *sp2;
+        /* format: depth|ticked|is_dir|name|path */
+        strtok_r(line, "|", &sp2);          /* depth  */
+        char *p_tick = strtok_r(NULL, "|", &sp2); /* ticked */
+        strtok_r(NULL, "|", &sp2);          /* is_dir */
+        strtok_r(NULL, "|", &sp2);          /* name   */
+        char *p_path = strtok_r(NULL, "", &sp2);  /* path   */
+        if (p_tick && p_path && p_path[0]) {
+            if (saved_tick_n >= cap) {
+                cap *= 2;
+                PathTick *tmp = realloc(saved_ticks, cap * sizeof(PathTick));
+                if (!tmp) break;
+                saved_ticks = tmp;
+            }
+            strncpy(saved_ticks[saved_tick_n].path, p_path,
+                    sizeof(saved_ticks[0].path) - 1);
+            saved_ticks[saved_tick_n].path[sizeof(saved_ticks[0].path) - 1] = '\0';
+            saved_ticks[saved_tick_n].ticked = atoi(p_tick);
+            saved_tick_n++;
+        }
+        line = strtok_r(NULL, "\n", &sp1);
+    }
+    free(copy);
+}
+
+// Verilen yol için kaydedilmiş ticked değerini döner; yoksa 1 (yeni dosya = erişilebilir).
+static int get_saved_tick(const char *path) {
+    for (int i = 0; i < saved_tick_n; i++)
+        if (strcmp(saved_ticks[i].path, path) == 0)
+            return saved_ticks[i].ticked;
+    return 1;
+}
+
 // Dosya sistemini doğrudan tarayarak önbelleği yeniden oluşturur (GTK'ya dokunmaz, thread-safe).
 static void rebuild_cache_recursive(const char *path, int depth) {
     if (depth >= MAX_TREE_DEPTH) return;
@@ -341,7 +395,9 @@ static void rebuild_cache_recursive(const char *path, int depth) {
             is_dir = 1;
         char display_name[512];
         snprintf(display_name, sizeof(display_name), is_dir ? "📁 %s" : "📄 %s", dir->d_name);
-        append_to_cache(depth, TRUE, is_dir, display_name, full_path);
+        /* Önceki erişim durumunu koru; yeni dosyalar varsayılan olarak erişilebilir. */
+        int ticked = get_saved_tick(full_path);
+        append_to_cache(depth, ticked, is_dir, display_name, full_path);
         if (is_dir)
             rebuild_cache_recursive(full_path, depth + 1);
     }
@@ -350,10 +406,14 @@ static void rebuild_cache_recursive(const char *path, int depth) {
 
 static void rebuild_cache_from_disk(void) {
     pthread_rwlock_wrlock(&cache_rwlock);
+    save_ticks_from_cache();          /* mevcut erişim durumlarını kaydet */
     free(cached_list_response);
     cached_list_response = calloc(1, 1);
     cached_size = 0;
     rebuild_cache_recursive(".", 0);
+    free(saved_ticks);                /* geçici diziyi temizle */
+    saved_ticks  = NULL;
+    saved_tick_n = 0;
     pthread_rwlock_unlock(&cache_rwlock);
 }
 
