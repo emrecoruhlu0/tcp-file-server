@@ -49,7 +49,10 @@ static int connect_with_timeout(int sock, struct sockaddr_in *sa, int timeout_se
     return 0;
 }
 
-int client_sock = -1;
+int client_sock  = -1;
+int notify_sock  = -1;
+static pthread_t notify_thread_id;
+static void *notify_listener(void *arg);
 
 GtkWidget *main_window;
 GtkWidget *ip_entry;
@@ -412,10 +415,25 @@ void on_connect_clicked(GtkWidget *w, gpointer data) {
     }
     free(list_data);
     gtk_tree_view_expand_all(GTK_TREE_VIEW(tree_view));
+
+    // Bildirim soketi: sunucu dosya yüklenince NOTIFY\n gönderir.
+    int nsock = socket(AF_INET, SOCK_STREAM, 0);
+    if (nsock != -1 && connect_with_timeout(nsock, &sa, CONNECT_TIMEOUT_SEC) == 0) {
+        send(nsock, "WATCH\n", 6, 0);
+        notify_sock = nsock;
+        pthread_create(&notify_thread_id, NULL, notify_listener, NULL);
+        pthread_detach(notify_thread_id);
+    } else if (nsock != -1) {
+        close(nsock);
+    }
 }
 
 void on_disconnect_clicked(GtkWidget *w, gpointer data) {
     (void)w; (void)data;
+    if (notify_sock != -1) {
+        close(notify_sock);
+        notify_sock = -1;
+    }
     if (client_sock != -1) {
         close(client_sock);
         client_sock = -1;
@@ -514,6 +532,86 @@ void on_put_clicked(GtkWidget *w, gpointer data) {
         g_free(filepath);
     }
     gtk_widget_destroy(dialog);
+}
+
+// Sunucudan güncel dosya listesini alarak ağacı yeniler (GTK ana thread'inde çalışır).
+static void refresh_list_from_server(void) {
+    if (client_sock == -1 || transfer_active) return;
+
+    send(client_sock, "LIST\n", 5, 0);
+    gtk_tree_store_clear(tree_store);
+
+    size_t cap = 8192, used = 0;
+    char *list_data = malloc(cap);
+    if (!list_data) return;
+    list_data[0] = '\0';
+    char recv_buf[4096];
+
+    while (1) {
+        int r = recv(client_sock, recv_buf, sizeof(recv_buf), 0);
+        if (r <= 0) break;
+        if (used + r + 1 > cap) {
+            while (used + r + 1 > cap) cap *= 2;
+            char *tmp = realloc(list_data, cap);
+            if (!tmp) { free(list_data); return; }
+            list_data = tmp;
+        }
+        memcpy(list_data + used, recv_buf, r);
+        used += r;
+        list_data[used] = '\0';
+        if (strstr(list_data, "__END_OF_LIST__\n")) break;
+    }
+
+    char *saveptr1;
+    char *line = strtok_r(list_data, "\n", &saveptr1);
+    GtkTreeIter iters[MAX_TREE_DEPTH + 1];
+
+    while (line) {
+        if (strcmp(line, "__END_OF_LIST__") == 0) break;
+        char *saveptr2;
+        char *p_depth  = strtok_r(line, "|", &saveptr2);
+        char *p_ticked = strtok_r(NULL, "|", &saveptr2);
+        char *p_dir    = strtok_r(NULL, "|", &saveptr2);
+        char *p_name   = strtok_r(NULL, "|", &saveptr2);
+        char *p_path   = strtok_r(NULL, "", &saveptr2);
+        if (p_path && p_depth && p_ticked && p_name) {
+            int depth     = atoi(p_depth);
+            int is_ticked = atoi(p_ticked);
+            if (depth < 0 || depth > MAX_TREE_DEPTH) { line = strtok_r(NULL, "\n", &saveptr1); continue; }
+            GtkTreeIter *parent = (depth == 0) ? NULL : &iters[depth - 1];
+            gtk_tree_store_append(tree_store, &iters[depth], parent);
+            (void)p_dir;
+            const char *color = is_ticked ? "black" : "red";
+            char display_name[512];
+            if (is_ticked)
+                snprintf(display_name, sizeof(display_name), "%s", p_name);
+            else
+                snprintf(display_name, sizeof(display_name), "%s (Erişim Engellendi)", p_name);
+            gtk_tree_store_set(tree_store, &iters[depth], 0, display_name, 1, color, 2, p_path, -1);
+        }
+        line = strtok_r(NULL, "\n", &saveptr1);
+    }
+    free(list_data);
+    gtk_tree_view_expand_all(GTK_TREE_VIEW(tree_view));
+}
+
+static gboolean refresh_list_idle(gpointer data) {
+    (void)data;
+    refresh_list_from_server();
+    return G_SOURCE_REMOVE;
+}
+
+// Bildirim soketini dinler; NOTIFY gelince listeyi yeniler.
+static void *notify_listener(void *arg) {
+    (void)arg;
+    char buf[64];
+    while (notify_sock != -1) {
+        int r = recv_line(notify_sock, buf, sizeof(buf));
+        if (r <= 0) break;
+        if (strncmp(buf, "NOTIFY", 6) == 0)
+            g_idle_add(refresh_list_idle, NULL);
+    }
+    return NULL;
 }
 
 // Uygulamaya modern bir görünüm kazandıran CSS temasını yükler.

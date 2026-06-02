@@ -48,6 +48,12 @@ GtkWidget *clients_label;   // "Bağlı istemci: N" etiketi
 volatile int connected_clients = 0;
 pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+// Push bildirim aboneleri (WATCH komutu gönderen istemci soketleri)
+#define MAX_NOTIFY_CLIENTS 64
+static int notify_sockets[MAX_NOTIFY_CLIENTS];
+static int notify_count = 0;
+static pthread_mutex_t notify_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 // Ana thread'te çalışır (g_idle_add): tek bir log satırını GUI paneline ekler.
 // data: g_strdup ile ayrılmış, "[zaman] mesaj" biçimli satır; burada serbest bırakılır.
 static gboolean append_log_to_view(gpointer data) {
@@ -110,6 +116,31 @@ static void update_client_count(int delta) {
     if (connected_clients < 0) connected_clients = 0;
     pthread_mutex_unlock(&clients_mutex);
     g_idle_add(refresh_clients_label, NULL);
+}
+
+static void add_notify_socket(int sock) {
+    pthread_mutex_lock(&notify_mutex);
+    if (notify_count < MAX_NOTIFY_CLIENTS)
+        notify_sockets[notify_count++] = sock;
+    pthread_mutex_unlock(&notify_mutex);
+}
+
+static void remove_notify_socket(int sock) {
+    pthread_mutex_lock(&notify_mutex);
+    for (int i = 0; i < notify_count; i++) {
+        if (notify_sockets[i] == sock) {
+            notify_sockets[i] = notify_sockets[--notify_count];
+            break;
+        }
+    }
+    pthread_mutex_unlock(&notify_mutex);
+}
+
+static void broadcast_notify(void) {
+    pthread_mutex_lock(&notify_mutex);
+    for (int i = 0; i < notify_count; i++)
+        send(notify_sockets[i], "NOTIFY\n", 7, MSG_NOSIGNAL);
+    pthread_mutex_unlock(&notify_mutex);
 }
 
 // Satır okuma yardımcı fonksiyonu (Komutları güvenle almak için)
@@ -219,6 +250,45 @@ void populate_tree(GtkTreeStore *store, GtkTreeIter *parent, const char *path, i
         }
     }
     closedir(d);
+}
+
+void append_to_cache(int depth, gboolean is_ticked, int is_dir, const char *name, const char *path);
+
+// Dosya sistemini doğrudan tarayarak önbelleği yeniden oluşturur (GTK'ya dokunmaz, thread-safe).
+static void rebuild_cache_recursive(const char *path, int depth) {
+    if (depth >= MAX_TREE_DEPTH) return;
+    DIR *d = opendir(path);
+    if (!d) return;
+    struct dirent *dir;
+    while ((dir = readdir(d)) != NULL) {
+        if (dir->d_name[0] == '.') continue;
+        char full_path[2048];
+        if (strcmp(path, ".") == 0)
+            snprintf(full_path, sizeof(full_path), "%s", dir->d_name);
+        else
+            snprintf(full_path, sizeof(full_path), "%s/%s", path, dir->d_name);
+        struct stat st;
+        int is_dir = 0;
+        if (stat(full_path, &st) == 0)
+            is_dir = S_ISDIR(st.st_mode);
+        else if (dir->d_type == DT_DIR)
+            is_dir = 1;
+        char display_name[512];
+        snprintf(display_name, sizeof(display_name), is_dir ? "📁 %s" : "📄 %s", dir->d_name);
+        append_to_cache(depth, TRUE, is_dir, display_name, full_path);
+        if (is_dir)
+            rebuild_cache_recursive(full_path, depth + 1);
+    }
+    closedir(d);
+}
+
+static void rebuild_cache_from_disk(void) {
+    pthread_rwlock_wrlock(&cache_rwlock);
+    free(cached_list_response);
+    cached_list_response = calloc(1, 1);
+    cached_size = 0;
+    rebuild_cache_recursive(".", 0);
+    pthread_rwlock_unlock(&cache_rwlock);
 }
 
 // İstemciye yollanacak veriyi ekler
@@ -386,6 +456,8 @@ void *client_handler(void *socket_desc) {
                              "PUT %s (boyut: %ld byte, sure: %.3fs, hiz: %.2f MB/s)",
                              filename, total, elapsed, mbps);
                     log_event(log_msg);
+                    rebuild_cache_from_disk();
+                    broadcast_notify();
                 } else {
                     send(client_sock, "ERROR Sunucu dosyayi olusturamadi\n", 34, 0);
                     log_event("Hata: PUT icin dosya olusturulamadi.");
@@ -393,6 +465,14 @@ void *client_handler(void *socket_desc) {
             } else {
                 send(client_sock, "ERROR HATA\n", 11, 0);
             }
+        }
+        else if (strncmp(buffer, "WATCH", 5) == 0) {
+            // Bildirim abonesi: dosya yüklenince NOTIFY\n gönderilir.
+            add_notify_socket(client_sock);
+            char dummy[16];
+            while (recv(client_sock, dummy, sizeof(dummy), 0) > 0);
+            remove_notify_socket(client_sock);
+            break;
         }
         else {
             char *msg = "HATA: Gecersiz komut.\n";
