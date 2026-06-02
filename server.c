@@ -161,6 +161,15 @@ static gboolean refresh_server_tree_idle(gpointer data) {
     return G_SOURCE_REMOVE;
 }
 
+// server.log, ikili dosyalar ve gizli dosyalar gibi dahili dosyaları dışarıda bırakır.
+static int is_relevant_filename(const char *name) {
+    if (!name || name[0] == '\0' || name[0] == '.') return 0;
+    if (strcmp(name, "server.log") == 0) return 0;
+    if (strcmp(name, "server") == 0)     return 0;
+    if (strcmp(name, "client") == 0)     return 0;
+    return 1;
+}
+
 // İzleme thread'i: dizindeki değişikliklerde cache + GUI + istemcileri günceller.
 static void *inotify_watcher(void *arg) {
     (void)arg;
@@ -168,19 +177,31 @@ static void *inotify_watcher(void *arg) {
     while (inotify_fd != -1) {
         ssize_t len = read(inotify_fd, buf, sizeof(buf));
         if (len <= 0) break;
-        // Ardışık hızlı eventleri birleştirmek için kısa bekleme.
-        usleep(150000);
-        // Biriken ek eventleri tüket (artık sadece bir yenileme tetiklenir).
+
+        // Gelen eventlerde ilgili bir dosya değişikliği var mı kontrol et.
+        int relevant = 0;
+        char *ptr = buf;
+        while (ptr < buf + len) {
+            struct inotify_event *ev = (struct inotify_event *)ptr;
+            if (ev->len > 0 && is_relevant_filename(ev->name))
+                relevant = 1;
+            ptr += sizeof(struct inotify_event) + ev->len;
+        }
+        if (!relevant) continue;
+
+        // Ardışık hızlı eventleri birleştir: 200ms bekle, sonra tamponu boşalt.
+        usleep(200000);
         struct timeval tv = {0, 0};
         fd_set fds;
         FD_ZERO(&fds);
         FD_SET(inotify_fd, &fds);
-        while (select(inotify_fd + 1, &fds, NULL, NULL, &tv) > 0) {
+        while (inotify_fd != -1 && select(inotify_fd + 1, &fds, NULL, NULL, &tv) > 0) {
             if (read(inotify_fd, buf, sizeof(buf)) <= 0) break;
             FD_ZERO(&fds);
             FD_SET(inotify_fd, &fds);
             tv.tv_sec = 0; tv.tv_usec = 0;
         }
+
         rebuild_cache_from_disk();
         broadcast_notify();
         g_idle_add(refresh_server_tree_idle, NULL);
