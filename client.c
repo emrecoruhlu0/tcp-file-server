@@ -11,7 +11,8 @@
 #include <pthread.h>
 
 // Sunucudaki ağaç derinliği sınırıyla uyumlu olmalı (server.c).
-#define MAX_TREE_DEPTH 16
+#define MAX_TREE_DEPTH      16
+#define DEFAULT_PORT        8765
 
 // Bağlantı zaman aşımı (saniye). GUI'nin uzun süre donmasını engeller.
 #define CONNECT_TIMEOUT_SEC 5
@@ -53,6 +54,7 @@ int client_sock  = -1;
 int notify_sock  = -1;
 static pthread_t notify_thread_id;
 static void *notify_listener(void *arg);
+static void  refresh_list_from_server(void);
 
 GtkWidget *main_window;
 GtkWidget *ip_entry;
@@ -81,6 +83,7 @@ typedef struct {
 // Transfer bittiğinde ana thread'e geçirilen sonuç.
 typedef struct {
     int  success;          // 1 = başarılı
+    int  is_put;           // 1 = PUT transferi; tamamlanınca listeyi yenile
     char message[320];     // dialogda gösterilecek mesaj (çağıranların m[300]'ünü taşırmadan alır)
 } TransferResult;
 
@@ -117,7 +120,10 @@ static gboolean apply_result(gpointer data) {
         GTK_BUTTONS_OK, "%s", r->message);
     gtk_dialog_run(GTK_DIALOG(md));
     gtk_widget_destroy(md);
+    int do_refresh = r->success && r->is_put;
     g_free(r);
+    if (do_refresh)
+        refresh_list_from_server();
     return G_SOURCE_REMOVE;
 }
 
@@ -130,9 +136,10 @@ static void post_progress(double fraction, const char *text) {
 }
 
 // Worker'dan ana thread'e sonuç gönderir.
-static void post_result(int success, const char *msg) {
+static void post_result(int success, const char *msg, int is_put) {
     TransferResult *r = g_new0(TransferResult, 1);
     r->success = success;
+    r->is_put  = is_put;
     snprintf(r->message, sizeof(r->message), "%s", msg);
     g_idle_add(apply_result, r);
 }
@@ -191,14 +198,14 @@ static void *transfer_worker(void *arg) {
 
         char resp[128];
         if (recv_line(client_sock, resp, sizeof(resp)) <= 0) {
-            post_result(0, "Sunucudan yanıt alınamadı.");
+            post_result(0, "Sunucudan yanıt alınamadı.", 0);
             free(job);
             return NULL;
         }
         if (strncmp(resp, "OK ", 3) != 0) {
             char m[300];
             snprintf(m, sizeof(m), "İndirme başarısız: %s", resp);
-            post_result(0, m);
+            post_result(0, m, 0);
             free(job);
             return NULL;
         }
@@ -206,7 +213,7 @@ static void *transfer_worker(void *arg) {
         long size = atol(resp + 3);
         FILE *f = fopen(job->local_path, "wb");
         if (!f) {
-            post_result(0, "Yerel dosya oluşturulamadı.");
+            post_result(0, "Yerel dosya oluşturulamadı.", 0);
             free(job);
             return NULL;
         }
@@ -230,9 +237,9 @@ static void *transfer_worker(void *arg) {
         fclose(f);
 
         if (total == size) {
-            post_result(1, "Dosya başarıyla indirildi.");
+            post_result(1, "Dosya başarıyla indirildi.", 0);
         } else {
-            post_result(0, "İndirme yarıda kesildi (bağlantı koptu).");
+            post_result(0, "İndirme yarıda kesildi (bağlantı koptu).", 0);
         }
     } else {
         // ---- PUT ----
@@ -244,14 +251,14 @@ static void *transfer_worker(void *arg) {
             char m[300];
             snprintf(m, sizeof(m), "Sunucu yüklemeyi reddetti: %s",
                      resp[0] ? resp : "(yanıt yok)");
-            post_result(0, m);
+            post_result(0, m, 1);
             free(job);
             return NULL;
         }
 
         FILE *f = fopen(job->local_path, "rb");
         if (!f) {
-            post_result(0, "Kaynak dosya açılamadı.");
+            post_result(0, "Kaynak dosya açılamadı.", 1);
             free(job);
             return NULL;
         }
@@ -273,9 +280,9 @@ static void *transfer_worker(void *arg) {
         fclose(f);
 
         if (total == job->filesize) {
-            post_result(1, "Dosya başarıyla yüklendi.");
+            post_result(1, "Dosya başarıyla yüklendi.", 1);
         } else {
-            post_result(0, "Yükleme yarıda kesildi (bağlantı koptu).");
+            post_result(0, "Yükleme yarıda kesildi (bağlantı koptu).", 1);
         }
     }
 
@@ -294,12 +301,13 @@ static void start_transfer(TransferJob *job) {
 
     pthread_t tid;
     if (pthread_create(&tid, NULL, transfer_worker, job) != 0) {
+        int is_put = job->is_put;
         transfer_active = 0;
         gtk_widget_set_sensitive(get_btn, TRUE);
         gtk_widget_set_sensitive(put_btn, TRUE);
         gtk_widget_set_sensitive(disconnect_btn, TRUE);
         free(job);
-        post_result(0, "Transfer thread'i oluşturulamadı.");
+        post_result(0, "Transfer thread'i oluşturulamadı.", is_put);
         return;
     }
     pthread_detach(tid);
@@ -706,7 +714,7 @@ int main(int argc, char *argv[]) {
     
     gtk_box_pack_start(GTK_BOX(top_hbox), gtk_label_new("Port:"), FALSE, FALSE, 0);
     port_spin = gtk_spin_button_new_with_range(1, 65535, 1);
-    gtk_spin_button_set_value(GTK_SPIN_BUTTON(port_spin), 8080); // makul varsayılan
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(port_spin), DEFAULT_PORT);
     gtk_box_pack_start(GTK_BOX(top_hbox), port_spin, FALSE, FALSE, 0);
     
     connect_btn = gtk_button_new_with_label("Bağlan");

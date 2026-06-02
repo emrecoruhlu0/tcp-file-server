@@ -12,7 +12,8 @@
 #include <time.h>
 #include <sys/inotify.h>
 
-#define BUFFER_SIZE 4096
+#define BUFFER_SIZE  4096
+#define DEFAULT_PORT 8765
 
 // Global değişkenler
 int server_sock = -1;
@@ -683,7 +684,7 @@ void on_toggle_clicked(GtkWidget *widget, gpointer data) {
         
         server.sin_family = AF_INET;
         server.sin_addr.s_addr = INADDR_ANY;
-        server.sin_port = htons(0); 
+        server.sin_port = htons(DEFAULT_PORT);
 
         if(bind(server_sock, (struct sockaddr *)&server, sizeof(server)) < 0) {
             perror("Bind basarisiz");
