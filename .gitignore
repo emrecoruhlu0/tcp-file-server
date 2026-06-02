@@ -2,3 +2,5 @@ server
 client
 *.o
 *.log
+*rapor*
+*.py
