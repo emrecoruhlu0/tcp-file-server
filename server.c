@@ -152,12 +152,49 @@ static void broadcast_notify(void) {
 void populate_tree(GtkTreeStore *store, GtkTreeIter *parent, const char *path, int depth);
 static void rebuild_cache_from_disk(void);
 
-// Ana thread'te çalışır: sunucu ağaç görünümünü diskten yeniler.
+// Ana thread'te çalışır: sunucu ağaç görünümünü cached_list_response'dan yeniler.
+// populate_tree her şeyi ticked=TRUE yapar; bu fonksiyon gerçek erişim durumunu korur.
 static gboolean refresh_server_tree_idle(gpointer data) {
     (void)data;
     if (!tree_store || !tree_view) return G_SOURCE_REMOVE;
     gtk_tree_store_clear(tree_store);
-    populate_tree(tree_store, NULL, ".", 0);
+
+    pthread_rwlock_rdlock(&cache_rwlock);
+    if (!cached_list_response || cached_size == 0) {
+        pthread_rwlock_unlock(&cache_rwlock);
+        return G_SOURCE_REMOVE;
+    }
+    char *copy = strdup(cached_list_response);
+    pthread_rwlock_unlock(&cache_rwlock);
+    if (!copy) return G_SOURCE_REMOVE;
+
+    GtkTreeIter iters[MAX_TREE_DEPTH + 1];
+    char *sp1, *line = strtok_r(copy, "\n", &sp1);
+    while (line) {
+        char *sp2;
+        char *p_depth  = strtok_r(line,  "|", &sp2);
+        char *p_ticked = strtok_r(NULL,  "|", &sp2);
+        strtok_r(NULL, "|", &sp2);               /* is_dir — isimde zaten emoji var */
+        char *p_name   = strtok_r(NULL,  "|", &sp2);
+        char *p_path   = strtok_r(NULL,  "",  &sp2);
+        if (p_depth && p_ticked && p_name && p_path && p_path[0]) {
+            int depth    = atoi(p_depth);
+            int ticked   = atoi(p_ticked);
+            if (depth < 0 || depth > MAX_TREE_DEPTH) {
+                line = strtok_r(NULL, "\n", &sp1);
+                continue;
+            }
+            GtkTreeIter *parent = (depth == 0) ? NULL : &iters[depth - 1];
+            gtk_tree_store_append(tree_store, &iters[depth], parent);
+            gtk_tree_store_set(tree_store, &iters[depth],
+                               0, p_name,
+                               1, (gboolean)ticked,
+                               2, p_path,
+                               -1);
+        }
+        line = strtok_r(NULL, "\n", &sp1);
+    }
+    free(copy);
     gtk_tree_view_expand_all(GTK_TREE_VIEW(tree_view));
     return G_SOURCE_REMOVE;
 }
