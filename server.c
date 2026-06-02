@@ -483,7 +483,7 @@ void on_toggle_clicked(GtkWidget *widget, gpointer data) {
 
         if(bind(server_sock, (struct sockaddr *)&server, sizeof(server)) < 0) {
             perror("Bind basarisiz");
-            gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='red' weight='bold'>Hata: Port alınamadı!</span>");
+            gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='#c81e1e' weight='bold'>Hata: Port alınamadı!</span>");
             close(server_sock);
             server_sock = -1;
             return;
@@ -504,10 +504,10 @@ void on_toggle_clicked(GtkWidget *widget, gpointer data) {
         gtk_style_context_add_class(gtk_widget_get_style_context(toggle_button), "danger");
         gtk_widget_set_sensitive(refresh_button, FALSE); // Çalışırken liste değiştirilemez
 
-        gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='green' weight='bold'>Durum: Çalışıyor</span>");
+        gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='#15803d' weight='bold'>Durum: Çalışıyor</span>");
         
         char ip_port_markup[256];
-        snprintf(ip_port_markup, sizeof(ip_port_markup), "IP: <span foreground='blue'>%s</span> | Port: <span foreground='blue'>%d</span>", current_ip, current_port);
+        snprintf(ip_port_markup, sizeof(ip_port_markup), "IP: <span foreground='#1d4ed8' weight='bold'>%s</span> | Port: <span foreground='#1d4ed8' weight='bold'>%d</span>", current_ip, current_port);
         gtk_label_set_markup(GTK_LABEL(ip_port_label), ip_port_markup);
         
         log_event("Sunucu baslatildi.");
@@ -540,7 +540,7 @@ void on_toggle_clicked(GtkWidget *widget, gpointer data) {
         gtk_style_context_remove_class(gtk_widget_get_style_context(toggle_button), "danger");
         gtk_style_context_add_class(gtk_widget_get_style_context(toggle_button), "primary");
         gtk_widget_set_sensitive(refresh_button, TRUE);
-        gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='red' weight='bold'>Durum: Durduruldu</span>");
+        gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='#c81e1e' weight='bold'>Durum: Durduruldu</span>");
         gtk_label_set_text(GTK_LABEL(ip_port_label), "");
 
         log_event("Sunucu durduruldu.");
@@ -559,37 +559,47 @@ void on_toggle_clicked(GtkWidget *widget, gpointer data) {
 static void apply_css(void) {
     GtkCssProvider *provider = gtk_css_provider_new();
     const char *css =
-        "window { background-color: #f4f6f8; }"
+        /* Genel: açık arka plan + koyu metin (sistem teması koyu olsa bile sabit) */
+        "window { background-color: #f4f6f8; color: #1f2933; }"
+        "label { color: #1f2933; }"
+        "entry, spinbutton, spinbutton entry {"
+        "  color: #1f2933; background-color: #ffffff;"
+        "}"
+        "entry placeholder, entry:disabled { color: #6b7280; }"
         "button {"
         "  padding: 8px 14px;"
         "  border-radius: 6px;"
         "  font-weight: bold;"
-        "  border: 1px solid #cbd5e1;"
+        "  color: #1f2933;"
+        "  border: 1px solid #94a3b8;"
         "  background-image: none;"
         "  background-color: #ffffff;"
         "  transition: background-color 120ms ease;"
         "}"
-        "button:hover { background-image: none; background-color: #eef4fb; }"
-        "button:active { background-image: none; background-color: #d9e6f2; }"
-        "button:disabled { color: #9aa5b1; background-color: #f0f2f5; }"
+        "button:hover { background-image: none; background-color: #e8eef6; }"
+        "button:active { background-image: none; background-color: #d4e0ef; }"
+        /* Devre dışı: metin/zemin arası kontrast WCAG AA üstü kalsın */
+        "button:disabled { color: #64748b; background-color: #e5e8ec; border-color: #cbd5e1; }"
         /* Sunucuyu başlat (yeşil/birincil) */
         "button.primary {"
-        "  background-image: none; background-color: #2e8b57;"
-        "  color: #ffffff; border: 1px solid #277a4c;"
+        "  background-image: none; background-color: #15803d;"
+        "  color: #ffffff; border: 1px solid #166534;"
         "}"
-        "button.primary:hover { background-color: #277a4c; }"
+        "button.primary:hover { background-color: #166534; }"
+        "button.primary:disabled { background-color: #94c2a4; color: #f8fafc; border-color: #94c2a4; }"
         /* Sunucuyu durdur (kırmızı) */
         "button.danger {"
-        "  background-image: none; background-color: #ef4444;"
-        "  color: #ffffff; border: 1px solid #dc2626;"
+        "  background-image: none; background-color: #dc2626;"
+        "  color: #ffffff; border: 1px solid #b91c1c;"
         "}"
-        "button.danger:hover { background-color: #dc2626; }"
-        "textview { font-size: 10pt; background-color: #1e1e1e; color: #d4d4d4; }"
-        "textview text { background-color: #1e1e1e; color: #d4d4d4; }"
-        "treeview { font-size: 11pt; }"
-        "treeview:selected { background-color: #3b82f6; color: #ffffff; }"
-        "treeview header button { font-weight: bold; background-color: #eef2f7; }"
-        "label.section { font-weight: bold; font-size: 11pt; }";
+        "button.danger:hover { background-color: #b91c1c; }"
+        "button.danger:disabled { background-color: #e89a9a; color: #f8fafc; border-color: #e89a9a; }"
+        "textview { font-size: 10pt; background-color: #1e1e1e; color: #e6e6e6; }"
+        "textview text { background-color: #1e1e1e; color: #e6e6e6; }"
+        "treeview { font-size: 11pt; background-color: #ffffff; color: #1f2933; }"
+        "treeview:selected { background-color: #1d4ed8; color: #ffffff; }"
+        "treeview header button { font-weight: bold; color: #1f2933; background-color: #e2e8f0; }"
+        "label.section { font-weight: bold; font-size: 11pt; color: #1f2933; }";
 
     gtk_css_provider_load_from_data(provider, css, -1, NULL);
     gtk_style_context_add_provider_for_screen(
@@ -615,7 +625,7 @@ int main(int argc, char *argv[]) {
     gtk_box_pack_start(GTK_BOX(vbox), top_hbox, FALSE, FALSE, 0);
 
     status_label = gtk_label_new(NULL);
-    gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='red' weight='bold'>Durum: Durduruldu</span>");
+    gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='#c81e1e' weight='bold'>Durum: Durduruldu</span>");
     gtk_widget_set_halign(status_label, GTK_ALIGN_START);
     gtk_box_pack_start(GTK_BOX(top_hbox), status_label, TRUE, TRUE, 0);
 

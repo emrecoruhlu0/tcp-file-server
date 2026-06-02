@@ -310,7 +310,7 @@ void on_connect_clicked(GtkWidget *w, gpointer data) {
     struct sockaddr_in sa;
     memset(&sa, 0, sizeof(sa));
     if (inet_pton(AF_INET, ip, &(sa.sin_addr)) != 1) {
-        gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='red' weight='bold'>HATA: Geçersiz IPv4 Adresi!</span>");
+        gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='#c81e1e' weight='bold'>HATA: Geçersiz IPv4 Adresi!</span>");
         return;
     }
     
@@ -323,13 +323,13 @@ void on_connect_clicked(GtkWidget *w, gpointer data) {
     while (gtk_events_pending()) gtk_main_iteration();
 
     if (connect_with_timeout(client_sock, &sa, CONNECT_TIMEOUT_SEC) < 0) {
-        gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='red' weight='bold'>Bağlantı hatası! Sunucu açık mı? (zaman aşımı)</span>");
+        gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='#c81e1e' weight='bold'>Bağlantı hatası! Sunucu açık mı? (zaman aşımı)</span>");
         close(client_sock);
         client_sock = -1;
         return;
     }
     
-    gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='green' weight='bold'>✓ Bağlanıldı — dosyalar getiriliyor…</span>");
+    gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='#15803d' weight='bold'>✓ Bağlanıldı — dosyalar getiriliyor…</span>");
     gtk_widget_set_sensitive(connect_btn, FALSE);
     gtk_widget_set_sensitive(ip_entry, FALSE);
     gtk_widget_set_sensitive(port_spin, FALSE);
@@ -344,7 +344,7 @@ void on_connect_clicked(GtkWidget *w, gpointer data) {
     size_t used = 0;
     char *list_data = malloc(cap);
     if (!list_data) {
-        gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='red' weight='bold'>Bellek hatasi</span>");
+        gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='#c81e1e' weight='bold'>Bellek hatasi</span>");
         return;
     }
     list_data[0] = '\0';
@@ -424,7 +424,7 @@ void on_disconnect_clicked(GtkWidget *w, gpointer data) {
     gtk_widget_set_sensitive(ip_entry, TRUE);
     gtk_widget_set_sensitive(port_spin, TRUE);
     gtk_widget_set_sensitive(disconnect_btn, FALSE);
-    gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='#6b7280' weight='bold'>● Bağlantı kesildi.</span>");
+    gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='#475569' weight='bold'>● Bağlantı kesildi.</span>");
     gtk_tree_store_clear(tree_store);
 }
 
@@ -520,52 +520,63 @@ void on_put_clicked(GtkWidget *w, gpointer data) {
 static void apply_css(void) {
     GtkCssProvider *provider = gtk_css_provider_new();
     const char *css =
-        "window { background-color: #f4f6f8; }"
+        /* Genel: açık arka plan + koyu metin (sistem teması koyu olsa bile sabit) */
+        "window { background-color: #f4f6f8; color: #1f2933; }"
+        "label { color: #1f2933; }"
+        "entry, spinbutton, spinbutton entry {"
+        "  color: #1f2933; background-color: #ffffff;"
+        "}"
+        "entry placeholder, entry:disabled { color: #6b7280; }"
         "button {"
         "  padding: 8px 14px;"
         "  border-radius: 6px;"
         "  font-weight: bold;"
-        "  border: 1px solid #cbd5e1;"
+        "  color: #1f2933;"
+        "  border: 1px solid #94a3b8;"
         "  background-image: none;"
         "  background-color: #ffffff;"
         "  transition: background-color 120ms ease, box-shadow 120ms ease;"
         "}"
-        "button:hover { background-image: none; background-color: #eef4fb; }"
-        "button:active { background-image: none; background-color: #d9e6f2; }"
-        "button:disabled { color: #9aa5b1; background-color: #f0f2f5; }"
+        "button:hover { background-image: none; background-color: #e8eef6; }"
+        "button:active { background-image: none; background-color: #d4e0ef; }"
+        /* Devre dışı: metin/zemin arası kontrast WCAG AA üstü kalsın */
+        "button:disabled { color: #64748b; background-color: #e5e8ec; border-color: #cbd5e1; }"
         /* Birincil aksiyon (Bağlan / İndir) */
         "button.primary {"
-        "  background-image: none; background-color: #3b82f6;"
-        "  color: #ffffff; border: 1px solid #2563eb;"
+        "  background-image: none; background-color: #1d4ed8;"
+        "  color: #ffffff; border: 1px solid #1e40af;"
         "}"
-        "button.primary:hover { background-color: #2f74e6; }"
-        "button.primary:active { background-color: #2563eb; }"
+        "button.primary:hover { background-color: #1e40af; }"
+        "button.primary:active { background-color: #1e3a8a; }"
+        "button.primary:disabled { background-color: #93acdf; color: #f8fafc; border-color: #93acdf; }"
         /* İkincil/yükle aksiyonu */
         "button.accent {"
-        "  background-image: none; background-color: #0ea5a4;"
-        "  color: #ffffff; border: 1px solid #0d9488;"
+        "  background-image: none; background-color: #0f766e;"
+        "  color: #ffffff; border: 1px solid #115e59;"
         "}"
-        "button.accent:hover { background-color: #0d9488; }"
+        "button.accent:hover { background-color: #115e59; }"
+        "button.accent:disabled { background-color: #8fc4bf; color: #f8fafc; border-color: #8fc4bf; }"
         /* Tehlikeli aksiyon (Kopar) */
         "button.danger {"
-        "  background-image: none; background-color: #ef4444;"
-        "  color: #ffffff; border: 1px solid #dc2626;"
+        "  background-image: none; background-color: #dc2626;"
+        "  color: #ffffff; border: 1px solid #b91c1c;"
         "}"
-        "button.danger:hover { background-color: #dc2626; }"
-        "entry { border-radius: 6px; padding: 4px 8px; }"
-        "entry:focus { border-color: #3b82f6; box-shadow: 0 0 0 2px #bfdbfe; }"
-        "spinbutton:focus { border-color: #3b82f6; }"
-        "progressbar > trough { min-height: 18px; border-radius: 6px; }"
+        "button.danger:hover { background-color: #b91c1c; }"
+        "button.danger:disabled { background-color: #e89a9a; color: #f8fafc; border-color: #e89a9a; }"
+        "entry { border-radius: 6px; padding: 4px 8px; border: 1px solid #94a3b8; }"
+        "entry:focus { border-color: #1d4ed8; box-shadow: 0 0 0 2px #93acdf; }"
+        "spinbutton:focus { border-color: #1d4ed8; }"
+        "progressbar > trough { min-height: 18px; border-radius: 6px; background-color: #d4e0ef; }"
         "progressbar > trough > progress {"
         "  background-image: none;"
-        "  background-color: #2e8b57;"
+        "  background-color: #15803d;"
         "  border-radius: 6px;"
         "}"
-        "progressbar text { font-weight: bold; }"
-        "treeview { font-size: 11pt; }"
-        "treeview:selected { background-color: #3b82f6; color: #ffffff; }"
-        "treeview header button { font-weight: bold; background-color: #eef2f7; }"
-        "label.section { font-weight: bold; font-size: 11pt; }";
+        "progressbar text { font-weight: bold; color: #1f2933; }"
+        "treeview { font-size: 11pt; background-color: #ffffff; color: #1f2933; }"
+        "treeview:selected { background-color: #1d4ed8; color: #ffffff; }"
+        "treeview header button { font-weight: bold; color: #1f2933; background-color: #e2e8f0; }"
+        "label.section { font-weight: bold; font-size: 11pt; color: #1f2933; }";
 
     gtk_css_provider_load_from_data(provider, css, -1, NULL);
     gtk_style_context_add_provider_for_screen(
@@ -612,7 +623,7 @@ int main(int argc, char *argv[]) {
     gtk_box_pack_start(GTK_BOX(top_hbox), disconnect_btn, FALSE, FALSE, 0);
     
     status_label = gtk_label_new(NULL);
-    gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='#6b7280'>Bağlantı bekleniyor…</span>");
+    gtk_label_set_markup(GTK_LABEL(status_label), "<span foreground='#475569'>Bağlantı bekleniyor…</span>");
     gtk_widget_set_halign(status_label, GTK_ALIGN_START);
     gtk_box_pack_start(GTK_BOX(vbox), status_label, FALSE, FALSE, 0);
     
